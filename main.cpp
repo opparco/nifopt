@@ -372,7 +372,7 @@ void ChangeExtension(std::string& filename, const std::string& extension)
 
 int main(int argc, char* const argv[], char* const envp[])
 {
-	if (argc != 4) {
+	if (argc != 2) {
 		std::cout << "Usage: nifopt.exe your.nif (-headpart) (--no-rename) " << std::endl;
 		return 1;
 	}
