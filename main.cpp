@@ -39,7 +39,7 @@ struct OptResultSSE
 	std::vector<std::string> shapesParallaxRemoved;
 };
 
-OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOptionsSSE())
+OptResultSSE OptimizeForSSE(NifFile& nif,  OptOptionsSSE& options)
 {
 	OptResultSSE result;
 
@@ -372,14 +372,21 @@ void ChangeExtension(std::string& filename, const std::string& extension)
 
 int main(int argc, char* const argv[], char* const envp[])
 {
-	if (argc != 2) {
-		std::cout << "Usage: nifopt.exe your.nif" << std::endl;
+	if (argc != 4) {
+		std::cout << "Usage: nifopt.exe your.nif (-headpart) (--no-rename) " << std::endl;
 		return 1;
 	}
 
 	NifFile nif;
+	
+	OptOptionsSSE options = OptOptionsSSE();
 
 	char* filename = argv[1];
+	
+	if (argv[2] == "-headpart" || argv[3] == "-headpart"){
+		options.headParts = true;	
+	}
+	
 	nif.Load(filename);
 
 	NiHeader& hdr = nif.GetHeader();
@@ -393,11 +400,14 @@ int main(int argc, char* const argv[], char* const envp[])
 
 	if (version.User() == 12 && version.Stream() == 83) {
 		printf("Optimize for Skyrim SE.\n");
-		OptimizeForSSE(nif);
+		OptimizeForSSE(nif, options);
 
 		std::string opt_filename = std::string(filename);
+		
+		if(argv[2] != "--no-rename" && argv[3] != "--no-rename"){
 		ChangeExtension(opt_filename, ".opt.nif");
-
+		}
+		
 		printf("Save to %s\n", opt_filename.c_str());
 		nif.Save(opt_filename.c_str());
 	}
@@ -406,7 +416,10 @@ int main(int argc, char* const argv[], char* const envp[])
 		RevertForSLE(nif);
 
 		std::string rev_filename = std::string(filename);
+		
+		if(argv[2] != "--no-rename" && argv[3] != "--no-rename"){
 		ChangeExtension(rev_filename, ".rev.nif");
+		}
 
 		printf("Save to %s\n", rev_filename.c_str());
 		nif.Save(rev_filename.c_str());
