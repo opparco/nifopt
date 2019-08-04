@@ -21,15 +21,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // OptimizeForSSE function from
 // https://github.com/ousnius/BodySlide-and-Outfit-Studio/blob/dev/lib/NIF/NifFile.cpp
 
-struct OptOptionsSSE
-{
+struct OptOptions {
+#if 0
+	NiVersion targetVersion;
+#endif
 	bool headParts = false;
 	bool removeParallax = true;
 	bool calcBounds = true;
 };
 
-struct OptResultSSE
-{
+struct OptResult {
 	bool versionMismatch = false;
 	bool dupesRenamed = false;
 	std::vector<std::string> shapesVColorsRemoved;
@@ -39,9 +40,9 @@ struct OptResultSSE
 	std::vector<std::string> shapesParallaxRemoved;
 };
 
-OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOptionsSSE())
+OptResult OptimizeForSSE(NifFile& nif, const OptOptions& options = OptOptions())
 {
-	OptResultSSE result;
+	OptResult result;
 
 	NiHeader& hdr = nif.GetHeader();
 	NiVersion& version = hdr.GetVersion();
@@ -94,7 +95,7 @@ OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOpti
 						headPartEyes = true;
 
 					// No normals and tangents with model space maps
-					if ((bslsp->shaderFlags1 & (1 << 12)) != 0) {
+					if (bslsp->IsModelSpace()) {
 						if (!normals->empty())
 							result.shapesNormalsRemoved.push_back(shapeName);
 
@@ -105,9 +106,11 @@ OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOpti
 					if ((bslsp->shaderFlags2 & (1 << 29)) != 0)
 						removeVertexColors = false;
 
-					// Disable flag if vertex colors were removed
-					if (removeVertexColors)
-						bslsp->shaderFlags2 &= ~(1 << 5);
+					// Disable flags if vertex colors were removed
+					if (removeVertexColors) {
+						bslsp->SetVertexColors(false);
+						bslsp->SetVertexAlpha(false);
+					}
 
 					if (options.removeParallax) {
 						if (bslsp->GetShaderType() == BSLSP_PARALLAX) {
@@ -137,9 +140,11 @@ OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOpti
 					if ((bsesp->shaderFlags2 & (1 << 29)) != 0)
 						removeVertexColors = false;
 
-					// Disable flag if vertex colors were removed
-					if (removeVertexColors)
-						bsesp->shaderFlags2 &= ~(1 << 5);
+					// Disable flags if vertex colors were removed
+					if (removeVertexColors) {
+						bsesp->SetVertexColors(false);
+						bsesp->SetVertexAlpha(false);
+					}
 				}
 			}
 
@@ -312,51 +317,210 @@ OptResultSSE OptimizeForSSE(NifFile& nif, const OptOptionsSSE& options = OptOpti
 	return result;
 }
 
-void RevertForSLE(NifFile& nif)
+void RevertForSLE(NifFile& nif, const OptOptions& options = OptOptions())
 {
+	OptResult result;
+
 	NiHeader& hdr = nif.GetHeader();
 	NiVersion& version = hdr.GetVersion();
+
+	if (!nif.IsTerrain())
+		result.dupesRenamed = nif.RenameDuplicateShapes();
 
 	version.SetStream(83);
 
 	for (auto &shape : nif.GetShapes()) {
-		NiTriShape* triShape = new NiTriShape();
+		std::string shapeName = shape->GetName();
 
-		BSTriShape* bsOptShape = dynamic_cast<BSTriShape*>(shape);
-		if (bsOptShape) {
-			bsOptShape->GetRawVerts();
-			bsOptShape->GetNormalData(false);
-			bsOptShape->GetUVData();
+		auto bsTriShape = dynamic_cast<BSTriShape*>(shape);
+		if (bsTriShape) {
+			bool removeVertexColors = true;
+			bool hasTangents = bsTriShape->HasTangents();
+			std::vector<Vector3>* vertices = bsTriShape->GetRawVerts();
+			std::vector<Vector3>* normals = bsTriShape->GetNormalData(false);
+			std::vector<Color4>* colors = bsTriShape->GetColorData();
+			std::vector<Vector2>* uvs = bsTriShape->GetUVData();
 
 			std::vector<Triangle> triangles;
-			bsOptShape->GetTriangles(triangles);
+			bsTriShape->GetTriangles(triangles);
 
-			NiTriShapeData* triShapeData = new NiTriShapeData();
-			triShapeData->Create(&bsOptShape->rawVertices, &triangles, &bsOptShape->rawUvs, &bsOptShape->rawNormals);
+			// Only remove vertex colors if all are 0xFFFFFFFF
+			if (colors) {
+				Color4 white(1.0f, 1.0f, 1.0f, 1.0f);
+				for (auto &c : (*colors)) {
+					if (white != c) {
+						removeVertexColors = false;
+						break;
+					}
+				}
+			}
 
-			triShape->SetGeomData(triShapeData);
+			bool headPartEyes = false;
+			NiShader* shader = nif.GetShader(shape);
+			if (shader) {
+				auto bslsp = dynamic_cast<BSLightingShaderProperty*>(shader);
+				if (bslsp) {
+					// Remember eyes flag for later
+					if ((bslsp->shaderFlags1 & (1 << 17)) != 0)
+						headPartEyes = true;
 
-			int triShapeDataRef = hdr.AddBlock(triShapeData);
-			triShape->SetDataRef(triShapeDataRef);
+					// No normals and tangents with model space maps
+					if (bslsp->IsModelSpace()) {
+						if (normals && !normals->empty())
+							result.shapesNormalsRemoved.push_back(shapeName);
+
+						normals = nullptr;
+					}
+
+					// Check tree anim flag
+					if ((bslsp->shaderFlags2 & (1 << 29)) != 0)
+						removeVertexColors = false;
+
+					// Disable flags if vertex colors were removed
+					if (removeVertexColors) {
+						bslsp->SetVertexColors(false);
+						bslsp->SetVertexAlpha(false);
+					}
+
+					if (options.removeParallax) {
+						if (bslsp->GetShaderType() == BSLSP_PARALLAX) {
+							// Change type from parallax to default
+							bslsp->SetShaderType(BSLSP_DEFAULT);
+
+							// Remove parallax flag
+							bslsp->shaderFlags1 &= ~(1 << 11);
+
+							// Remove parallax texture from set
+							auto textureSet = hdr.GetBlock<BSShaderTextureSet>(shader->GetTextureSetRef());
+							if (textureSet && textureSet->numTextures >= 4)
+								textureSet->textures[3].Clear();
+
+							result.shapesParallaxRemoved.push_back(shapeName);
+						}
+					}
+				}
+
+				auto bsesp = dynamic_cast<BSEffectShaderProperty*>(shader);
+				if (bsesp) {
+					// Remember eyes flag for later
+					if ((bsesp->shaderFlags1 & (1 << 17)) != 0)
+						headPartEyes = true;
+
+					// Check tree anim flag
+					if ((bsesp->shaderFlags2 & (1 << 29)) != 0)
+						removeVertexColors = false;
+
+					// Disable flags if vertex colors were removed
+					if (removeVertexColors) {
+						bsesp->SetVertexColors(false);
+						bsesp->SetVertexAlpha(false);
+					}
+				}
+			}
+
+			if (colors && !colors->empty() && removeVertexColors)
+				result.shapesVColorsRemoved.push_back(shapeName);
+
+			NiTriShape* bsOptShape = nullptr;
+			auto bsOptShapeData = new NiTriShapeData();
+			auto bsSITS = dynamic_cast<BSSubIndexTriShape*>(shape);
+			if (bsSITS)
+				bsOptShape = new BSSegmentedTriShape();
+			else
+				bsOptShape = new NiTriShape();
+
+			int dataId = hdr.AddBlock(bsOptShapeData);
+			bsOptShape->SetDataRef(dataId);
+			bsOptShape->SetGeomData(bsOptShapeData);
+			bsOptShapeData->Create(vertices, &triangles, uvs, normals);
+
+			bsOptShape->SetName(shape->GetName());
+			bsOptShape->SetControllerRef(shape->GetControllerRef());
+			bsOptShape->SetSkinInstanceRef(shape->GetSkinInstanceRef());
+			bsOptShape->SetShaderPropertyRef(shape->GetShaderPropertyRef());
+			bsOptShape->SetAlphaPropertyRef(shape->GetAlphaPropertyRef());
+			bsOptShape->SetCollisionRef(shape->GetCollisionRef());
+			bsOptShape->GetProperties() = shape->GetProperties();
+			bsOptShape->GetExtraData() = shape->GetExtraData();
+
+			bsOptShape->transform = shape->transform;
+			bsOptShape->flags = shape->flags;
+
+			// Move segments to new shape
+			if (bsSITS) {
+				auto bsSegmentShape = dynamic_cast<BSSegmentedTriShape*>(bsOptShape);
+				bsSegmentShape->numSegments = bsSITS->numSegments;
+				bsSegmentShape->segments = bsSITS->segments;
+			}
+
+			// Restore old bounds for static meshes or when calc bounds is off
+			if (!shape->IsSkinned() || !options.calcBounds)
+				bsOptShape->SetBounds(bsTriShape->GetBounds());
+
+			// Vertex Colors
+			if (bsOptShape->GetNumVertices() > 0) {
+				if (!removeVertexColors && colors && colors->size() > 0) {
+					bsOptShape->SetVertexColors(true);
+					for (int i = 0; i < bsOptShape->GetNumVertices(); i++)
+						bsOptShapeData->vertexColors[i] = (*colors)[i];
+				}
+
+				// Skinning and partitions
+				if (shape->IsSkinned()) {
+					auto skinInst = hdr.GetBlock<NiSkinInstance>(shape->GetSkinInstanceRef());
+					if (skinInst) {
+						auto skinPart = hdr.GetBlock<NiSkinPartition>(skinInst->GetSkinPartitionRef());
+						if (skinPart) {
+							bool triangulated = nif.TriangulatePartitions(shape);
+							if (triangulated)
+								result.shapesPartTriangulated.push_back(shapeName);
+
+							for (int partID = 0; partID < skinPart->numPartitions; partID++) {
+								NiSkinPartition::PartitionBlock& part = skinPart->partitions[partID];
+
+								std::vector<Triangle> realTris(part.numTriangles);
+								for (int i = 0; i < part.numTriangles; i++) {
+									auto& partTri = part.triangles[i];
+									Triangle tri;
+
+									// Find the vertex map index of the triangle points
+									auto mapIt1 = std::find(part.vertexMap.begin(), part.vertexMap.end(), partTri.p1);
+									if (mapIt1 != part.vertexMap.end())
+										tri.p1 = std::distance(part.vertexMap.begin(), mapIt1);
+
+									auto mapIt2 = std::find(part.vertexMap.begin(), part.vertexMap.end(), partTri.p2);
+									if (mapIt2 != part.vertexMap.end())
+										tri.p2 = std::distance(part.vertexMap.begin(), mapIt2);
+
+									auto mapIt3 = std::find(part.vertexMap.begin(), part.vertexMap.end(), partTri.p3);
+									if (mapIt3 != part.vertexMap.end())
+										tri.p3 = std::distance(part.vertexMap.begin(), mapIt3);
+
+									tri.rot();
+									realTris[i] = tri;
+								}
+
+								part.triangles = realTris;
+								part.trueTriangles.clear();
+							}
+						}
+					}
+				}
+			}
+			else
+				bsOptShape->SetVertices(false);
+
+			// Check if tangents were added
+			if (!hasTangents && bsOptShape->HasTangents())
+				result.shapesTangentsAdded.push_back(shapeName);
+
+			hdr.ReplaceBlock(nif.GetBlockID(shape), bsOptShape);
+			nif.UpdateSkinPartitions(bsOptShape);
 		}
-
-		triShape->SetName(shape->GetName());
-		triShape->SetControllerRef(shape->GetControllerRef());
-		triShape->SetSkinInstanceRef(shape->GetSkinInstanceRef());
-		triShape->SetShaderPropertyRef(shape->GetShaderPropertyRef());
-		triShape->SetAlphaPropertyRef(shape->GetAlphaPropertyRef());
-		triShape->SetCollisionRef(shape->GetCollisionRef());
-		triShape->GetProperties() = shape->GetProperties();
-		triShape->GetExtraData() = shape->GetExtraData();
-
-		triShape->transform = shape->transform;
-
-		triShape->flags = shape->flags;
-
-		hdr.ReplaceBlock(nif.GetBlockID(shape), triShape);
 	}
 
 	nif.DeleteUnreferencedBlocks();
+	nif.PrettySortBlocks();
 }
 
 #include <string>
